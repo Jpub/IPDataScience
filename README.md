@@ -1,9 +1,19 @@
-# <따라하며 배우는 데이터 과학> (2017) 소스코드
-"Introduction to Practical Data Science (IPDS)" (2017)
+  
+# 따라하며 배우는 데이터 과학
+  
+ ![따라하며 배우는 데이터 과학 표지](http://image.kyobobook.co.kr/images/book/large/869/l9791185890869.jpg)
+  
+**출판사** 제이펍  
+**저자명** 권재명  
+**출판일** 2017년 8월 4일  
+**페이지** 364쪽  
+**ISBN** 979-11-85890-86-9 (93000)  
 
-책 웹사이트: https://dataninja.me/ipds-kr/
+[### 도서 소개 페이지 바로 가기 ###](http://jpub.tistory.com/708)  
 
-## 목차:
+책 웹사이트: https://dataninja.me/ipds-kr/  
+
+## 목차:  
 
 1. 데이터 과학이란?
 1. 데이터 분석환경 구성하기
