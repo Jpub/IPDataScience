@@ -2,3 +2,14 @@
 .Rhistory
 .RData
 .Ruserdata
+
+_junk/
+*.data
+plots/
+*.names
+*.csv
+*.zip
+
+**/html/
+**/*_files/
+*.html

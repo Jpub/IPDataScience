@@ -1,0 +1,350 @@
+---
+title: "<따라 하며 배우는 데이터 과학> 8-9장 연습문제 해답"
+author: "권재명"
+date: "9/27/2017"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+저자 책 웹페이지: <https://dataninja.me/ipds-kr/>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE)
+```
+
+# 원 문제:
+
+- Ch 8 빅데이터 분류분석 I: 기본 개념과 로지스틱 모형
+- Ch 9 빅데이터 분류분석 II: 라쏘와 랜덤 포레스트
+
+<https://goo.gl/hmyTre> 혹은 
+<https://archive.ics.uci.edu/ml/datasets.html> 
+에서 고차원 분류분석 데이터를 찾아서 
+로지스틱 분류분석을 실행하고, 
+결과를 슬라이드 10여 장 내외로 요약하라.
+
+UCI 보다는 캐글에 있는 다음 자료를 분석해 보자.
+<https://www.kaggle.com/ludobenistant/hr-analytics>
+
+
+# R 환경 준비
+일단은 필수패키지인 `tidyverse`, 그리고 
+머신러닝을 위한 몇가지 패키지를 로드하자.
+(로딩 메시지를 감추기 위해 `suppressMessages()` 명령을 사용.)
+```{r}
+# install.packages("tidyverse")
+suppressMessages(library(tidyverse))
+
+# install.packages(c("ROCR", "MASS", "glmnet", "randomForest", "gbm", "rpart", "boot"))
+suppressMessages(library(gridExtra))
+suppressMessages(library(ROCR))
+suppressMessages(library(MASS))
+suppressMessages(library(glmnet))
+suppressMessages(library(randomForest))
+suppressMessages(library(gbm))
+suppressMessages(library(rpart))
+suppressMessages(library(boot))
+```
+
+
+책에서 기술한대로 이항 오차 함수, 그리고 `panel.cor` 함수를 정의하자:
+```{r}
+binomial_deviance <- function(y_obs, yhat){
+  epsilon = 0.0001
+  yhat = ifelse(yhat < epsilon, epsilon, yhat)
+  yhat = ifelse(yhat > 1-epsilon, 1-epsilon, yhat)
+  a = ifelse(y_obs==0, 0, y_obs * log(y_obs/yhat))
+  b = ifelse(y_obs==1, 0, (1-y_obs) * log((1-y_obs)/(1-yhat)))
+  return(2*sum(a + b))
+}
+
+# exmaple(pairs) 에서 따옴
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...){
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r <- abs(cor(x, y))
+  txt <- format(c(r, 0.123456789), digits = digits)[1]
+  txt <- paste0(prefix, txt)
+  if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+  text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+
+```
+
+자료를 `human-resources-analytics.zip` 파일로 다운받은 후 다음처럼 R에 읽어들인다:
+
+```{r}
+df <- read_csv("human-resources-analytics.zip")
+glimpse(df)
+```
+
+분석의 목적은 다른 변수를 이용하여 `left` 여부를 예측하는 것이다.
+
+각 변수들의 요약통계량을 살펴보자:
+```{r}
+summary(df)
+```
+
+범주형 변수들의 도수분포는 다음과 같다:
+```{r}
+table(df$left)
+table(df$sales)
+table(df$salary)
+```
+
+수량형 변수들간의 관계는 산점도 행렬로 살펴볼 수 있다:
+```{r}
+set.seed(2017)
+df %>% 
+  dplyr::select(-sales, -salary) %>% 
+  sample_n(500) %>% 
+  pairs(lower.panel=function(x,y){ points(x,y); abline(0, 1, col='red')},
+    upper.panel = panel.cor)
+```
+(`select` 함수가 `MASS` 라이브러리에 재정의 된 관계로 `dplyr::select()`로 표기했다. )
+반응변수와 큰 상관관계가 있는 변수는 satisfaction_level 임을 알 수 있고,
+설명변수중 past_evaluation, number_projects, average_monthly_hours 간에
+비교적 높은 상관관계가 있음을 알 수 있다.
+
+(혹시 시간이 걸리더라도 좀 더 고급진 산점도행렬을 얻고자 한다면 다음처럼
+`GGally::ggparis()` 함수를 사용하자)
+```{r}
+# install.packages("GGally")
+# suppressMessages(library(GGally))
+# set.seed(2017); df %>% sample_n(1000)  %>% GGally::ggpairs()
+```
+
+
+
+## 훈련, 검증, 테스트셋의 구분
+
+
+모형행렬은 반응변수 `left` 를 제외한 모든 변수들을
+`model.matrix()` 에 입력해주면 얻을 수 있다:
+```{r}
+x <- model.matrix( ~ . - left, data=df)
+glimpse(x)
+colnames(x)
+dim(x)
+```
+모형의 차원은 $p=19$ 임을 알 수 있다.
+
+원 데이터를 6:4:4 비율로 훈련, 검증, 테스트셋으로 나누도록 하자.
+(재현 가능성을 위해 `set.seed()`를 사용했다.)
+```{r}
+set.seed(2017)
+n <- nrow(df)
+idx <- 1:n
+training_idx <- sample(idx, n * .60)
+idx <- setdiff(idx, training_idx)
+validate_idx = sample(idx, n * .20)
+test_idx <- setdiff(idx, validate_idx)
+length(training_idx)
+length(validate_idx)
+length(test_idx)
+training <- df[training_idx,]
+validation <- df[validate_idx,]
+test <- df[test_idx,]
+```
+
+
+
+## A. 로지스틱 회귀분석
+
+```{r}
+df_glm_full <- glm(left ~ ., data=training, family=binomial)
+summary(df_glm_full)
+```
+
+
+로지스틱 모형의 예측 정확도 지표는 다음처럼 계산하고 시각화할 수 있다:
+```{r}
+y_obs <- validation$left
+yhat_lm <- predict(df_glm_full, newdata=validation, type='response')
+ggplot(data.frame(y_obs, yhat_lm),
+             aes(yhat_lm, fill=factor(y_obs))) +
+  geom_density(alpha=.5)
+binomial_deviance(y_obs, yhat_lm)
+pred_lm <- prediction(yhat_lm, y_obs)
+perf_lm <- performance(pred_lm, measure = "tpr", x.measure = "fpr")
+plot(perf_lm, col='black', main="ROC Curve for GLM")
+performance(pred_lm, "auc")@y.values[[1]]
+```
+
+
+## B. glmnet 함수를 통한 라쏘 모형, 능형회귀, 변수선택
+
+```{r}
+xx <- model.matrix(left ~ .-1, df)
+x <- xx[training_idx, ]
+y <- training$left
+df_cvfit <- cv.glmnet(x, y, family = "binomial")
+```
+
+
+```{r}
+plot(df_cvfit)
+```
+
+
+```{r}
+y_obs <- validation$left
+yhat_glmnet <- predict(df_cvfit, s="lambda.1se", newx=xx[validate_idx,], type='response')
+yhat_glmnet <- yhat_glmnet[,1] # change to a vectro from [n*1] matrix
+binomial_deviance(y_obs, yhat_glmnet)
+pred_glmnet <- prediction(yhat_glmnet, y_obs)
+perf_glmnet <- performance(pred_glmnet, measure="tpr", x.measure="fpr")
+performance(pred_glmnet, "auc")@y.values[[1]]
+```
+
+
+## C. 나무모형
+
+나무모형을 적합하는 `rpart::rpart()` 함수를 적용할 때 주의할 사항은
+수량형 반응변수 `left` 를 인자로 변환해주어서 
+회귀 나무모형이 아니라 분류분석 나무모형을 적합하는 것이다.
+```{r}
+df_tr <- rpart(as.factor(left) ~ ., data = training)
+df_tr
+# printcp(df_tr)
+# summary(df_tr)
+opar <- par(mfrow = c(1,1), xpd = NA)
+plot(df_tr)
+text(df_tr, use.n = TRUE)
+par(opar)
+```
+
+나무모형의 출력 결과를 살펴보면 어떤 변수들의 조합이
+직원의 이직율을 높이는 지 알수 있다.
+그림에서 가장 "성공"(이직)의 비율이 높은 잎(leaf)는 가장 오른쪽의 
+잎, 즉:
+
+- `3) satisfaction_level< 0.465 2551 1025 1 (0.40180321 0.59819679)`
+-  `7) number_project< 2.5 1069  125 1 (0.11693171 0.88306829)`
+- `15) last_evaluation< 0.575 985   48 1 (0.04873096 0.95126904) *`
+
+만족도가 낮고, 일한 프로젝트가 적고, 마지막 업무평가가 좋지 않은 집단임을 알 수 있다.
+
+```{r}
+yhat_tr <- predict(df_tr, validation)[, "1"]
+binomial_deviance(y_obs, yhat_tr)
+pred_tr <- prediction(yhat_tr, y_obs)
+perf_tr <- performance(pred_tr, measure = "tpr", x.measure = "fpr")
+performance(pred_tr, "auc")@y.values[[1]]
+```
+
+
+## D. 랜덤 포레스트 -----------
+`randomForest()` 함수를 적용할 때 주의할 사항은:
+
+1. 앞서 나무모형과 마찬가지로
+  수량형 반응변수 `left` 를 인자로 변환해주어서 
+  회귀모형이 아닌 분류분석이 실행되도록 한다.
+2. 설명변수중 character 형인 두 변수 `sales`, `salary` 도 인자형으로 
+  바꿔줘야 한다.
+
+
+```{r}
+set.seed(2017)
+df_rf <- randomForest(as.factor(left) ~ ., training %>%
+                        mutate(salary=as.factor(salary),
+                               sales=as.factor(sales)))
+df_rf
+```
+
+랜덤포레스트 모형의 오류 감소 추세 그래프는 다음과 같다:
+```{r}
+plot(df_rf)
+```
+
+각 변수들의 모형에의 기여도는 다음과 같다:
+```{r}
+varImpPlot(df_rf)
+```
+
+예측을 실행할 때는, 훈련셋과 마찬가지의 `as.factor` 변환을 
+같은 변수에 적용해야 한다:
+```{r}
+yhat_rf <- predict(df_rf,
+                   newdata=validation %>%
+                     mutate(salary=as.factor(salary), sales=as.factor(sales)),
+                   type='prob')[,'1']
+binomial_deviance(y_obs, yhat_rf)
+pred_rf <- prediction(yhat_rf, y_obs)
+perf_rf <- performance(pred_rf, measure="tpr", x.measure="fpr")
+performance(pred_tr, "auc")@y.values[[1]]
+```
+
+
+## E. 부스팅 
+(결과 생략)
+관심있는 독자는 다음 코드로 부스팅 모형을 실행할 수 있다.
+앞서 랜덤포레스트 모형과 마찬가지로, 문자형 변수를 인자형 변수로 먼저 변환해
+주어야 한다.
+```{r eval=FALSE}
+set.seed(2017)
+df_gbm <- gbm(left ~ ., data=training %>%
+                     mutate(salary=as.factor(salary), sales=as.factor(sales)),
+             distribution="bernoulli",
+             n.trees=1000, cv.folds=3, verbose=TRUE)
+(best_iter <- gbm.perf(df_gbm, method="cv"))
+
+
+yhat_gbm <- predict(df_gbm, n.trees=best_iter,
+                    newdata=validation %>%
+                     mutate(salary=as.factor(salary), sales=as.factor(sales)), 
+                    type='response')
+binomial_deviance(y_obs, yhat_gbm)
+pred_gbm <- prediction(yhat_gbm, y_obs)
+perf_gbm <- performance(pred_gbm, measure="tpr", x.measure="fpr")
+performance(pred_gbm, "auc")@y.values[[1]]
+```
+
+
+## 모형 비교, 최종 모형 선택, 일반화 성능 평가
+
+다음과 같은 시각화로 각 예측모형들의 예측확률들의 관계를 알 수 있다:
+```{r}
+pairs(data.frame(y_obs=y_obs,
+                 yhat_lm=yhat_lm,
+                 yhat_glmnet=c(yhat_glmnet),
+                 yhat_tr=yhat_tr,
+                 yhat_rf=yhat_rf),
+      lower.panel=function(x,y){ points(x,y); abline(0, 1, col='red')},
+      upper.panel = panel.cor)
+```
+로지스틱 모형과 glmnet 모형은 매우 유사한 결과를 주는 것을 알 수 있다.
+그리고, 나무 모형과 랜덤포레스트 모형도 상관관계가 높다.
+반응변수의 관측치와 가장 상관관계가 높은, 즉 예측력이 높은 방법은 랜덤포레스트이다.
+
+테스트셋을 이용해 일반화 능력을 계산해보자:
+```{r}
+y_obs_test <- test$left
+yhat_rf_test <- predict(df_rf,
+                   newdata=test %>%
+                     mutate(salary=as.factor(salary), sales=as.factor(sales)),
+                   type='prob')[,'1']
+binomial_deviance(y_obs_test, yhat_rf_test)
+pred_rf_test <- prediction(yhat_rf_test, y_obs_test)
+performance(pred_rf_test, "auc")@y.values[[1]]
+```
+
+
+마지막으로 ROC 커브를 통해 네 예측방법을 비교해보자.
+```{r}
+plot(perf_lm, col='black', main="ROC Curve")
+plot(perf_glmnet, add=TRUE, col='blue')
+plot(perf_tr, add=TRUE, col='red')
+plot(perf_rf, add=TRUE, col='cyan')
+legend('bottomright', inset=.1,
+       legend=c("GLM", "glmnet", "Tree", "RF"),
+       col=c('black', 'blue', 'red', 'cyan'), lty=1, lwd=2)
+```
+
+## 결론
+자료 자체가 가상의 (synthetic), 시뮬레이트 된 자료이므로
+비교적 간단한 모형인 나무모형으로도 무척 높은 예측력을 얻을 수 있었다.
+변수 해석에 관해서는 나무모형 결과를 참조하라.
